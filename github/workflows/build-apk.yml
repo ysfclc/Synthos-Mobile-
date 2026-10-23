@@ -1,78 +1,61 @@
 name: Build SynthOS Pocket APK
 
 on:
-  push:
-    branches: [main]
-    tags: ['v*.*.*']
-  pull_request:
-    branches: [main]
-  workflow_dispatch:
+push:
+pull_request:
+workflow_dispatch:
 
 permissions:
-  contents: read
+contents: read
 
 concurrency:
-  group: synthos-apk-${{ github.ref }}
-  cancel-in-progress: true
+group: synthos-build-${{ github.ref }}
+cancel-in-progress: true
 
 jobs:
-  build:
-    name: Test, lint and build installable APK
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - name: Check out source
-        uses: actions/checkout@v6
+build:
+name: Test and build APK
+runs-on: ubuntu-latest
+timeout-minutes: 35
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
+steps:
+  - name: Check out repository
+    uses: actions/checkout@v4
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+  - name: Verify project ZIP exists
+    run: |
+      test -f synthos-pocket-v1.0.0.zip || {
+        echo "::error::Missing synthos-pocket-v1.0.0.zip in repository root"
+        exit 1
+      }
 
-      - name: Install Android platform and build tools
-        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
+  - name: Extract Android project
+    run: |
+      mkdir -p "$RUNNER_TEMP/synthos-src"
+      unzip -q synthos-pocket-v1.0.0.zip \
+        -d "$RUNNER_TEMP/synthos-src"
 
-      - name: Set up Gradle and cache dependencies
-        uses: gradle/actions/setup-gradle@v6
-        with:
-          gradle-version: '8.9'
-          validate-wrappers: false
+      PROJECT_DIR="$RUNNER_TEMP/synthos-src/synthos-pocket-v1.0.0"
 
-      - name: Run unit tests and Android lint
-        run: gradle testDebugUnitTest lintDebug --stacktrace
+      test -f "$PROJECT_DIR/settings.gradle.kts"
+      test -f "$PROJECT_DIR/app/build.gradle.kts"
 
-      - name: Assemble debug-signed APK
-        run: gradle assembleDebug --stacktrace
+      echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Upload installable APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: synthos-pocket-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-          retention-days: 14
+  - name: Set up JDK 17
+    uses: actions/setup-java@v4
+    with:
+      distribution: temurin
+      java-version: '17'
 
-  release:
-    name: Publish APK for a version tag
-    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - name: Download tested APK artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: synthos-pocket-debug-apk
-          path: dist
+  - name: Set up Android SDK
+    uses: android-actions/setup-android@v3
 
-      - name: Publish APK on version tag
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/app-debug.apk
-          name: SynthOS Pocket ${{ github.ref_name }}
-          generate_release_notes: true
+  - name: Install Android build tools
+    run: |
+      sdkmanager --install \
+        "platforms;android-35" \
+        "build-tools;35.0.0" \
+        "platform-tools"
+
+  - name: Set up
