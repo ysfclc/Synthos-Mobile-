@@ -1,61 +1,92 @@
 name: Build SynthOS Pocket APK
 
 on:
-push:
-pull_request:
-workflow_dispatch:
+  push:
+  workflow_dispatch:
 
 permissions:
-contents: read
+  contents: read
 
 concurrency:
-group: synthos-build-${{ github.ref }}
-cancel-in-progress: true
+  group: synthos-pocket-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-build:
-name: Test and build APK
-runs-on: ubuntu-latest
-timeout-minutes: 35
+  build:
+    name: Build SynthOS Pocket
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
 
-steps:
-  - name: Check out repository
-    uses: actions/checkout@v4
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
 
-  - name: Verify project ZIP exists
-    run: |
-      test -f synthos-pocket-v1.0.0.zip || {
-        echo "::error::Missing synthos-pocket-v1.0.0.zip in repository root"
-        exit 1
-      }
+      - name: Check for uploaded project ZIP
+        id: zip_check
+        shell: bash
+        run: |
+          if [[ ! -f "synthos-pocket-v1.0.0.zip" ]]; then
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No synthos-pocket-v1.0.0.zip found yet. Upload the ZIP to the repository root; the next push will trigger the build."
+          else
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          fi
 
-  - name: Extract Android project
-    run: |
-      mkdir -p "$RUNNER_TEMP/synthos-src"
-      unzip -q synthos-pocket-v1.0.0.zip \
-        -d "$RUNNER_TEMP/synthos-src"
+      - name: Set up JDK 17
+        if: steps.zip_check.outputs.present == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
-      PROJECT_DIR="$RUNNER_TEMP/synthos-src/synthos-pocket-v1.0.0"
+      - name: Set up Android SDK
+        if: steps.zip_check.outputs.present == 'true'
+        uses: android-actions/setup-android@v3
 
-      test -f "$PROJECT_DIR/settings.gradle.kts"
-      test -f "$PROJECT_DIR/app/build.gradle.kts"
+      - name: Install Android platform and build tools
+        if: steps.zip_check.outputs.present == 'true'
+        run: sdkmanager --install "platforms;android-35" "build-tools;35.0.0" "platform-tools"
 
-      echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+      - name: Set up Gradle 8.9
+        if: steps.zip_check.outputs.present == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+          validate-wrappers: false
 
-  - name: Set up JDK 17
-    uses: actions/setup-java@v4
-    with:
-      distribution: temurin
-      java-version: '17'
+      - name: Extract ZIP and locate Android project
+        if: steps.zip_check.outputs.present == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/synthos-extracted"
+          unzip -q synthos-pocket-v1.0.0.zip -d "$RUNNER_TEMP/synthos-extracted"
+          SETTINGS_FILE="$(find "$RUNNER_TEMP/synthos-extracted" -maxdepth 4 -type f -name settings.gradle.kts -print -quit)"
+          if [[ -z "$SETTINGS_FILE" ]]; then
+            echo "::error::ZIP does not contain settings.gradle.kts"
+            exit 1
+          fi
+          PROJECT_DIR="$(dirname "$SETTINGS_FILE")"
+          if [[ ! -f "$PROJECT_DIR/app/build.gradle.kts" ]]; then
+            echo "::error::Could not find app/build.gradle.kts beside settings.gradle.kts"
+            exit 1
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Building project at: $PROJECT_DIR"
 
-  - name: Set up Android SDK
-    uses: android-actions/setup-android@v3
+      - name: Run unit tests and lint
+        if: steps.zip_check.outputs.present == 'true'
+        run: gradle -p "$PROJECT_DIR" testDebugUnitTest lintDebug --stacktrace
 
-  - name: Install Android build tools
-    run: |
-      sdkmanager --install \
-        "platforms;android-35" \
-        "build-tools;35.0.0" \
-        "platform-tools"
+      - name: Assemble installable debug APK
+        if: steps.zip_check.outputs.present == 'true'
+        run: gradle -p "$PROJECT_DIR" assembleDebug --stacktrace
 
-  - name: Set up
+      - name: Upload APK artifact
+        if: steps.zip_check.outputs.present == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthos-pocket-debug-apk
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
