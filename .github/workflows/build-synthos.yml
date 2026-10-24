@@ -1,78 +1,140 @@
-
-name: Build SynthOS APK
+name: Build SynthOS Android APK
 
 on:
-  push:
-  workflow_dispatch:
+push:
+branches: [main, master]
+paths:
+- "synthos-pocket.zip"
+- ".github/workflows/build-synthos.yml"
+workflow_dispatch:
 
 permissions:
-  contents: read
+contents: read
+
+concurrency:
+group: synthos-android-${{ github.ref }}
+cancel-in-progress: true
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+build:
+name: Verify, test and build APK
+runs-on: ubuntu-latest
+timeout-minutes: 30
 
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v5
+steps:
+  - name: Checkout repository
+    uses: actions/checkout@v4
 
-      - name: Install Java
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
+  - name: Verify source ZIP exists
+    shell: bash
+    run: |
+      set -euo pipefail
+      test -f synthos-pocket.zip || {
+        echo "::error::Missing synthos-pocket.zip in repository root"
+        exit 1
+      }
 
-      - name: Install Android SDK
-        shell: bash
-        run: |
-          set -e
-          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
-          if [ -z "$SDKMANAGER" ]; then
-            echo "Android SDK manager not found"
-            exit 1
-          fi
-          yes | "$SDKMANAGER" --licenses || true
-          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0"
+  - name: Verify ZIP integrity
+    shell: bash
+    run: |
+      set -euo pipefail
+      unzip -t synthos-pocket.zip
 
-      - name: Install Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: '8.13'
+  - name: Verify SHA-256 when sidecar exists
+    shell: bash
+    run: |
+      set -euo pipefail
+      if [ -f synthos-pocket.zip.sha256 ]; then
+        expected="$(awk '{print $1}' synthos-pocket.zip.sha256)"
+        actual="$(sha256sum synthos-pocket.zip | awk '{print $1}')"
+        if [ "$expected" != "$actual" ]; then
+          echo "::error::SHA-256 mismatch for synthos-pocket.zip"
+          echo "Expected: $expected"
+          echo "Actual:   $actual"
+          exit 1
+        fi
+        echo "SHA-256 verified: $actual"
+      else
+        echo "::notice::No checksum sidecar found; ZIP integrity was checked."
+      fi
 
-      - name: Verify source ZIP
-        run: |
-          test -f synthos-pocket.zip || {
-            echo "synthos-pocket.zip must be in the repository root"
-            exit 1
-          }
+  - name: Extract project
+    shell: bash
+    run: |
+      set -euo pipefail
+      mkdir -p extracted
+      unzip -q synthos-pocket.zip -d extracted
 
-      - name: Extract SynthOS
-        run: unzip -o synthos-pocket.zip
+      if [ -f extracted/synthos-pocket/settings.gradle.kts ]; then
+        PROJECT_DIR="extracted/synthos-pocket"
+      elif [ -f extracted/settings.gradle.kts ]; then
+        PROJECT_DIR="extracted"
+      else
+        echo "::error::Could not find settings.gradle.kts after extraction"
+        find extracted -maxdepth 3 -type f | head -100
+        exit 1
+      fi
 
-      - name: Enable AndroidX
-        working-directory: synthos-pocket
-        run: |
-          grep -qxF 'android.useAndroidX=true' gradle.properties || \
-            echo 'android.useAndroidX=true' >> gradle.properties
+      echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+      echo "Project directory: $PROJECT_DIR"
 
-      - name: Verify Android project
-        run: |
-          set -e
-          test -f synthos-pocket/settings.gradle.kts
-          test -f synthos-pocket/build.gradle.kts
-          test -f synthos-pocket/app/build.gradle.kts
-          test -f synthos-pocket/app/src/main/AndroidManifest.xml
+  - name: Set up JDK 17
+    uses: actions/setup-java@v4
+    with:
+      distribution: temurin
+      java-version: "17"
+      cache: gradle
+      cache-dependency-path: |
+        **/*.gradle
+        **/*.gradle.kts
+        **/gradle-wrapper.properties
 
-      - name: Test, lint, and build APK
-        working-directory: synthos-pocket
-        run: gradle --no-daemon testDebugUnitTest lintDebug assembleDebug
+  - name: Set up Android SDK
+    uses: android-actions/setup-android@v3
 
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: synthos-pocket-debug-apk
-          path: synthos-pocket/app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error
-          retention-days: 14
-          
+  - name: Validate Gradle wrapper
+    shell: bash
+    working-directory: ${{ env.PROJECT_DIR }}
+    run: |
+      set -euo pipefail
+      test -f gradlew || {
+        echo "::error::Gradle wrapper script gradlew is missing"
+        exit 1
+      }
+      chmod +x gradlew
+      test -f gradle/wrapper/gradle-wrapper.properties
+
+  - name: Run unit tests
+    shell: bash
+    working-directory: ${{ env.PROJECT_DIR }}
+    run: ./gradlew --no-daemon testDebugUnitTest
+
+  - name: Run Android lint
+    shell: bash
+    working-directory: ${{ env.PROJECT_DIR }}
+    run: ./gradlew --no-daemon lintDebug
+
+  - name: Assemble debug APK
+    shell: bash
+    working-directory: ${{ env.PROJECT_DIR }}
+    run: ./gradlew --no-daemon assembleDebug
+
+  - name: Upload test and lint reports
+    if: always()
+    uses: actions/upload-artifact@v4
+    with:
+      name: synthos-build-reports
+      if-no-files-found: ignore
+      path: |
+        ${{ env.PROJECT_DIR }}/app/build/reports/tests/
+        ${{ env.PROJECT_DIR }}/app/build/reports/lint-results*
+        ${{ env.PROJECT_DIR }}/app/build/test-results/
+
+  - name: Upload debug APK
+    if: success()
+    uses: actions/upload-artifact@v4
+    with:
+      name: synthos-pocket-debug-apk
+      if-no-files-found: error
+      path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+      retention-days: 14
