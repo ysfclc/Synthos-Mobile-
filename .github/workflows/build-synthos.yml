@@ -2,24 +2,21 @@ name: Build SynthOS Android APK
 
 on:
 push:
-branches: [main, master]
-paths:
-- "synthos-pocket.zip"
-- ".github/workflows/build-synthos.yml"
+pull_request:
 workflow_dispatch:
 
 permissions:
 contents: read
 
 concurrency:
-group: synthos-android-${{ github.ref }}
+group: synthos-android-${{ github.workflow }}-${{ github.ref }}
 cancel-in-progress: true
 
 jobs:
 build:
 name: Verify, test and build APK
 runs-on: ubuntu-latest
-timeout-minutes: 30
+timeout-minutes: 40
 
 steps:
   - name: Checkout repository
@@ -29,10 +26,10 @@ steps:
     shell: bash
     run: |
       set -euo pipefail
-      test -f synthos-pocket.zip || {
-        echo "::error::Missing synthos-pocket.zip in repository root"
+      if [ ! -f synthos-pocket.zip ]; then
+        echo "::error::Missing synthos-pocket.zip in repository root."
         exit 1
-      }
+      fi
 
   - name: Verify ZIP integrity
     shell: bash
@@ -44,18 +41,21 @@ steps:
     shell: bash
     run: |
       set -euo pipefail
+
       if [ -f synthos-pocket.zip.sha256 ]; then
-        expected="$(awk '{print $1}' synthos-pocket.zip.sha256)"
+        expected="$(awk 'NR==1 {print $1}' synthos-pocket.zip.sha256)"
         actual="$(sha256sum synthos-pocket.zip | awk '{print $1}')"
+
         if [ "$expected" != "$actual" ]; then
           echo "::error::SHA-256 mismatch for synthos-pocket.zip"
           echo "Expected: $expected"
           echo "Actual:   $actual"
           exit 1
         fi
+
         echo "SHA-256 verified: $actual"
       else
-        echo "::notice::No checksum sidecar found; ZIP integrity was checked."
+        echo "::notice::Checksum sidecar not found; ZIP integrity was checked."
       fi
 
   - name: Extract project
@@ -70,8 +70,8 @@ steps:
       elif [ -f extracted/settings.gradle.kts ]; then
         PROJECT_DIR="extracted"
       else
-        echo "::error::Could not find settings.gradle.kts after extraction"
-        find extracted -maxdepth 3 -type f | head -100
+        echo "::error::Could not find settings.gradle.kts after extraction."
+        find extracted -maxdepth 4 -type f | head -100
         exit 1
       fi
 
@@ -83,11 +83,6 @@ steps:
     with:
       distribution: temurin
       java-version: "17"
-      cache: gradle
-      cache-dependency-path: |
-        **/*.gradle
-        **/*.gradle.kts
-        **/gradle-wrapper.properties
 
   - name: Set up Android SDK
     uses: android-actions/setup-android@v3
@@ -98,11 +93,14 @@ steps:
     run: |
       set -euo pipefail
       test -f gradlew || {
-        echo "::error::Gradle wrapper script gradlew is missing"
+        echo "::error::Gradle wrapper script is missing."
+        exit 1
+      }
+      test -f gradle/wrapper/gradle-wrapper.properties || {
+        echo "::error::Gradle wrapper properties are missing."
         exit 1
       }
       chmod +x gradlew
-      test -f gradle/wrapper/gradle-wrapper.properties
 
   - name: Run unit tests
     shell: bash
@@ -120,7 +118,7 @@ steps:
     run: ./gradlew --no-daemon assembleDebug
 
   - name: Upload test and lint reports
-    if: always()
+    if: always() && env.PROJECT_DIR != ''
     uses: actions/upload-artifact@v4
     with:
       name: synthos-build-reports
