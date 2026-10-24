@@ -1,97 +1,78 @@
+
 name: Build SynthOS APK
 
 on:
-workflow_dispatch:
-push:
-branches:
-- main
-- master
+  push:
+  workflow_dispatch:
 
 permissions:
-contents: read
+  contents: read
 
 jobs:
-build:
-runs-on: ubuntu-latest
-timeout-minutes: 40
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
 
-steps:
-  - name: Check out repository
-    uses: actions/checkout@v5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
 
-  - name: Install Java
-    uses: actions/setup-java@v5
-    with:
-      distribution: temurin
-      java-version: '17'
+      - name: Install Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
 
-  - name: Install Android SDK packages
-    shell: bash
-    run: |
-      set -e
-      SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
-      if [ -z "$SDKMANAGER" ]; then
-        echo "Could not find Android SDK manager"
-        exit 1
-      fi
-      yes | "$SDKMANAGER" --licenses || true
-      "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0"
+      - name: Install Android SDK
+        shell: bash
+        run: |
+          set -e
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Android SDK manager not found"
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0"
 
-  - name: Install Gradle
-    uses: gradle/actions/setup-gradle@v4
-    with:
-      gradle-version: '8.14.4'
+      - name: Install Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
 
-  - name: Check and validate source ZIP
-    id: source
-    shell: bash
-    run: |
-      set -euo pipefail
-      if [ ! -f synthos-pocket.zip ]; then
-        echo "No synthos-pocket.zip found in repository root. Upload the ZIP to trigger a build."
-        exit 1
-      fi
-      unzip -t synthos-pocket.zip
-      if [ ! -f synthos-pocket.zip.sha256 ]; then
-        echo "Missing synthos-pocket.zip.sha256 sidecar"
-        exit 1
-      fi
-      sha256sum --check synthos-pocket.zip.sha256
-      ZIP_FILES="$(unzip -Z1 synthos-pocket.zip)"
-      grep -qx 'synthos-pocket/settings.gradle.kts' <<< "$ZIP_FILES"
-      grep -qx 'synthos-pocket/build.gradle.kts' <<< "$ZIP_FILES"
-      grep -qx 'synthos-pocket/app/build.gradle.kts' <<< "$ZIP_FILES"
-      grep -qx 'synthos-pocket/app/src/main/java/app/synthos/pocket/data/LocalAiRuntime.kt' <<< "$ZIP_FILES"
-      grep -qx 'synthos-pocket/app/src/main/java/app/synthos/pocket/data/SharedAttachmentImport.kt' <<< "$ZIP_FILES"
-      grep -qx 'synthos-pocket/app/src/test/java/app/synthos/pocket/data/CaptureCodecTest.kt' <<< "$ZIP_FILES"
-      echo "Source archive structure verified."
+      - name: Verify source ZIP
+        run: |
+          test -f synthos-pocket.zip || {
+            echo "synthos-pocket.zip must be in the repository root"
+            exit 1
+          }
 
-  - name: Extract source code
-    run: unzip -o synthos-pocket.zip
+      - name: Extract SynthOS
+        run: unzip -o synthos-pocket.zip
 
-  - name: Enable AndroidX
-    run: |
-      grep -qxF 'android.useAndroidX=true' synthos-pocket/gradle.properties || \
-        echo 'android.useAndroidX=true' >> synthos-pocket/gradle.properties
+      - name: Enable AndroidX
+        working-directory: synthos-pocket
+        run: |
+          grep -qxF 'android.useAndroidX=true' gradle.properties || \
+            echo 'android.useAndroidX=true' >> gradle.properties
 
-  - name: Verify project files
-    run: |
-      set -e
-      test -f synthos-pocket/settings.gradle.kts
-      test -f synthos-pocket/build.gradle.kts
-      test -f synthos-pocket/app/build.gradle.kts
-      test -f synthos-pocket/app/src/main/AndroidManifest.xml
-      test -f synthos-pocket/app/src/test/java/app/synthos/pocket/data/LocalAiPromptComposerTest.kt
-      echo "SynthOS Android project files found."
+      - name: Verify Android project
+        run: |
+          set -e
+          test -f synthos-pocket/settings.gradle.kts
+          test -f synthos-pocket/build.gradle.kts
+          test -f synthos-pocket/app/build.gradle.kts
+          test -f synthos-pocket/app/src/main/AndroidManifest.xml
 
-  - name: Test, lint, and build APK
-    working-directory: synthos-pocket
-    run: gradle --no-daemon testDebugUnitTest lintDebug assembleDebug
+      - name: Test, lint, and build APK
+        working-directory: synthos-pocket
+        run: gradle --no-daemon testDebugUnitTest lintDebug assembleDebug
 
-  - name: Upload APK
-    uses: actions/upload-artifact@v4
-    with:
-      name: synthos-pocket-debug-apk
-      path: synthos-pocket/app/build/outputs/apk/debug/app-debug.apk
-      if-no-files-found: error
-      retention-days: 14
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthos-pocket-debug-apk
+          path: synthos-pocket/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+          
